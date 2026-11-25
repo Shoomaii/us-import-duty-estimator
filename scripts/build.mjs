@@ -264,6 +264,13 @@ function renderHtml({ isPro }) {
       </div>
       <div class="form-grid" style="margin-bottom:12px;">
         <div>
+          <label for="batchEntryBasis">Customs Entry Basis</label>
+          <select id="batchEntryBasis">
+            <option value="consolidated" selected>Single Consolidated Entry (Pro-Rata MPF)</option>
+            <option value="separate">Separate Entry per SKU</option>
+          </select>
+        </div>
+        <div>
           <label for="batchExtraRate">Default Extra / Reciprocal Tariff (%)</label>
           <input id="batchExtraRate" type="number" step="0.5" min="0" value="10" />
         </div>
@@ -281,7 +288,7 @@ function renderHtml({ isPro }) {
           </select>
         </div>
         <div>
-          <label for="batchBroker">Broker Fee per SKU Entry ($)</label>
+          <label for="batchBroker">Total Broker Fee ($)</label>
           <input id="batchBroker" type="number" step="1" min="0" value="0" />
         </div>
       </div>
@@ -368,6 +375,16 @@ function renderHtml({ isPro }) {
       recalcSingle();
     }
 
+    function applyOriginChange() {
+      const p = findPreset(presetSel.value);
+      if (originSel.value === 'CN') {
+        document.getElementById('sec301Rate').value = p ? p.sec301Rate : document.getElementById('sec301Rate').value;
+      } else {
+        document.getElementById('sec301Rate').value = 0;
+      }
+      recalcSingle();
+    }
+
     function recalcSingle() {
       const origin = originSel.value;
       const country = COUNTRIES.find((c) => c.code === origin) || COUNTRIES[COUNTRIES.length - 1];
@@ -428,7 +445,7 @@ function renderHtml({ isPro }) {
     }
 
     presetSel.addEventListener('change', applyPresetRates);
-    originSel.addEventListener('change', applyPresetRates);
+    originSel.addEventListener('change', applyOriginChange);
     ['modeSelect','unitCost','quantity','freight','insurance','brokerFee','mfnRate','sec301Rate','sec232Rate','extraRate','targetMargin','currentRetail','usmcaCheck']
       .forEach((id) => document.getElementById(id).addEventListener('input', recalcSingle));
     recalcSingle();
@@ -449,6 +466,7 @@ function renderHtml({ isPro }) {
       const text = document.getElementById('batchCsvText').value;
       const res = analyzeBatchCsv(text, {
         isPro: IS_PRO,
+        entryBasis: document.getElementById('batchEntryBasis').value,
         defaultExtraTariffRate: Number(document.getElementById('batchExtraRate').value || 0),
         defaultTargetMarginPct: Number(document.getElementById('batchMargin').value || 60),
         defaultShippingMode: document.getElementById('batchMode').value,
@@ -457,6 +475,9 @@ function renderHtml({ isPro }) {
       lastBatch = res;
 
       const alerts = [];
+      if (res.errors.length && res.rows.length) {
+        alerts.push(\`<div class="alert alert-err"><strong>Export blocked:</strong> \${res.errors.length} row error(s) found. Summary totals below exclude invalid rows until fixed.</div>\`);
+      }
       for (const e of res.errors) alerts.push(\`<div class="alert alert-err">\${esc(e.message)}</div>\`);
       if (res.truncatedCount > 0) {
         alerts.push(\`<div class="alert alert-warn">Showing first \${res.visibleSkus} of \${res.totalSkus} SKUs (\${res.truncatedCount} hidden in Free Preview). Upgrade to Offline Pro ($19) for unlimited SKU exports.</div>\`);

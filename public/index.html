@@ -250,6 +250,13 @@
       </div>
       <div class="form-grid" style="margin-bottom:12px;">
         <div>
+          <label for="batchEntryBasis">Customs Entry Basis</label>
+          <select id="batchEntryBasis">
+            <option value="consolidated" selected>Single Consolidated Entry (Pro-Rata MPF)</option>
+            <option value="separate">Separate Entry per SKU</option>
+          </select>
+        </div>
+        <div>
           <label for="batchExtraRate">Default Extra / Reciprocal Tariff (%)</label>
           <input id="batchExtraRate" type="number" step="0.5" min="0" value="10" />
         </div>
@@ -267,7 +274,7 @@
           </select>
         </div>
         <div>
-          <label for="batchBroker">Broker Fee per SKU Entry ($)</label>
+          <label for="batchBroker">Total Broker Fee ($)</label>
           <input id="batchBroker" type="number" step="1" min="0" value="0" />
         </div>
       </div>
@@ -332,7 +339,7 @@ const CBP_RULES = {
 };
 
 const COUNTRIES = [
-  { code: 'CN', name: 'China', sec301Eligible: true, usmca: false, note: 'Subject to Chapter 99 Section 301 lists (7.5%–50%) regardless of dispatch country.' },
+  { code: 'CN', name: 'China (incl. Hong Kong origin)', sec301Eligible: true, usmca: false, note: 'Subject to Chapter 99 Section 301 lists (7.5%–50%) regardless of dispatch country. Under EO 13936, Hong Kong-origin goods are treated as China origin.' },
   { code: 'VN', name: 'Vietnam', sec301Eligible: false, usmca: false, note: 'MFN base rates apply; verify non-China substantial transformation.' },
   { code: 'IN', name: 'India', sec301Eligible: false, usmca: false, note: 'MFN base rates apply.' },
   { code: 'MX', name: 'Mexico', sec301Eligible: false, usmca: true, note: 'USMCA-qualifying goods get 0% MFN + $0 MPF.' },
@@ -385,6 +392,12 @@ const COUNTRY_BY_CODE = new Map(COUNTRIES.map((c) => [c.code, c]));
 const PRESET_BY_ID = new Map(HTS_PRESETS.map((p) => [p.id, p]));
 const PRESET_BY_HTS = new Map(HTS_PRESETS.map((p) => [p.hts.replace(/\./g, ''), p]));
 
+// Recognized WTO/common 2-letter ISO origin codes that fall under Column 1 MFN ('OTHER')
+const OTHER_WTO_ISO2 = new Set([
+  'AT','BE','BR','CH','CL','CO','CZ','DK','ES','FI','FR','GR','HU','IE','IL',
+  'KH','LK','MA','MY','NL','NO','NZ','PE','PH','PL','PT','RO','SE','SG','SK','ZA',
+]);
+
 function round2(n) {
   return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 }
@@ -395,7 +408,6 @@ function findPreset(htsOrId) {
   if (PRESET_BY_ID.has(raw)) return PRESET_BY_ID.get(raw);
   const digits = raw.replace(/\D+/g, '');
   if (PRESET_BY_HTS.has(digits)) return PRESET_BY_HTS.get(digits);
-  // Match 6-digit heading prefix if 8/10-digit suffix differs
   if (digits.length >= 6) {
     for (const p of HTS_PRESETS) {
       const pd = p.hts.replace(/\D+/g, '');
@@ -410,14 +422,32 @@ function normalizeCountry(raw) {
   if (!s) return '';
   if (COUNTRY_BY_CODE.has(s)) return s;
   const aliases = {
-    CHINA: 'CN', PRC: 'CN', 'HONG KONG': 'CN',
+    CHINA: 'CN', PRC: 'CN', HK: 'CN', 'HONG KONG': 'CN', HONGKONG: 'CN',
     VIETNAM: 'VN', INDIA: 'IN', MEXICO: 'MX', CANADA: 'CA',
-    GERMANY: 'DE', ITALY: 'IT', UK: 'GB', 'UNITED KINGDOM': 'GB',
+    GERMANY: 'DE', ITALY: 'IT', UK: 'GB', 'UNITED KINGDOM': 'GB', BRITAIN: 'GB',
     JAPAN: 'JP', KOREA: 'KR', 'SOUTH KOREA': 'KR', TAIWAN: 'TW',
     TURKEY: 'TR', THAILAND: 'TH', INDONESIA: 'ID', BANGLADESH: 'BD',
     PAKISTAN: 'PK', AUSTRALIA: 'AU', EU: 'DE',
   };
-  return aliases[s] || (s.length === 2 ? 'OTHER' : '');
+  if (aliases[s]) return aliases[s];
+  if (OTHER_WTO_ISO2.has(s)) return 'OTHER';
+  return '';
+}
+
+function normalizeShippingMode(raw) {
+  const s = String(raw || '').trim().toLowerCase();
+  if (!s) return 'ocean';
+  if (['ocean', 'sea', 'vessel', 'fcl', 'lcl', 'maritime', 'boat', 'ship'].includes(s)) return 'ocean';
+  if (['air', 'airfreight', 'air freight', 'plane'].includes(s)) return 'air';
+  if (['courier', 'express', 'dhl', 'fedex', 'ups', 'usps', 'parcel', 'post'].includes(s)) return 'courier';
+  if (['truck', 'rail', 'ground', 'road', 'ltl', 'ftl', 'land'].includes(s)) return 'truck';
+  return '';
+}
+
+function assertNonNegFinite(val, label) {
+  if (!Number.isFinite(val) || val < 0) {
+    throw new Error(`${label} must be a valid non-negative number.`);
+  }
 }
 
 /**
@@ -426,42 +456,52 @@ function normalizeCountry(raw) {
 function calculateShipment(input) {
   const unitCost = Number(input.unitCost);
   const quantity = Number(input.quantity);
-  const freight = Number(input.freight || 0);
-  const insurance = Number(input.insurance || 0);
-  const brokerFee = Number(input.brokerFee || 0);
-  const targetMarginPct = Number(input.targetMarginPct ?? 60);
+  const freight = input.freight === '' || input.freight === undefined || input.freight === null ? 0 : Number(input.freight);
+  const insurance = input.insurance === '' || input.insurance === undefined || input.insurance === null ? 0 : Number(input.insurance);
+  const brokerFee = input.brokerFee === '' || input.brokerFee === undefined || input.brokerFee === null ? 0 : Number(input.brokerFee);
+  const targetMarginPct = input.targetMarginPct === '' || input.targetMarginPct === undefined || input.targetMarginPct === null
+    ? 60
+    : Number(input.targetMarginPct);
   const currentRetailPrice = input.currentRetailPrice !== undefined && input.currentRetailPrice !== '' && input.currentRetailPrice !== null
     ? Number(input.currentRetailPrice)
     : null;
 
-  if (!Number.isFinite(unitCost) || unitCost < 0) throw new Error('Unit cost must be a valid non-negative number.');
+  assertNonNegFinite(unitCost, 'Unit cost');
   if (!Number.isFinite(quantity) || quantity <= 0) throw new Error('Quantity must be greater than 0.');
-  if (!Number.isFinite(freight) || freight < 0) throw new Error('Freight must be a non-negative number.');
-  if (!Number.isFinite(insurance) || insurance < 0) throw new Error('Insurance must be a non-negative number.');
-  if (!Number.isFinite(brokerFee) || brokerFee < 0) throw new Error('Broker fee must be a non-negative number.');
+  assertNonNegFinite(freight, 'Freight');
+  assertNonNegFinite(insurance, 'Insurance');
+  assertNonNegFinite(brokerFee, 'Broker fee');
   if (!Number.isFinite(targetMarginPct) || targetMarginPct < 0 || targetMarginPct >= 99) {
     throw new Error('Target margin must be between 0% and 98.9%.');
   }
+  if (currentRetailPrice !== null) {
+    assertNonNegFinite(currentRetailPrice, 'Current retail price');
+  }
 
-  const origin = normalizeCountry(input.origin || 'CN') || 'OTHER';
+  const origin = normalizeCountry(input.origin || 'CN');
+  if (!origin) throw new Error(`Unsupported country of origin: "${input.origin}".`);
   const country = COUNTRY_BY_CODE.get(origin) || COUNTRY_BY_CODE.get('OTHER');
   const preset = findPreset(input.presetId || input.htsCode);
-  const mode = String(input.shippingMode || 'ocean').trim().toLowerCase();
+
+  const mode = normalizeShippingMode(input.shippingMode ?? 'ocean');
+  if (!mode) throw new Error(`Unsupported shipping mode: "${input.shippingMode}". Use ocean, air, courier, or truck.`);
 
   const customsValue = round2(unitCost * quantity);
 
   const rawMfnRate = input.mfnRate !== undefined && input.mfnRate !== '' && input.mfnRate !== null
     ? Number(input.mfnRate)
     : (preset ? preset.mfnRate : 0);
+  assertNonNegFinite(rawMfnRate, 'Base MFN duty rate');
 
   const usmcaApplied = Boolean(input.usmcaQualifying) && Boolean(country.usmca);
-  const effectiveMfnRate = usmcaApplied ? 0 : Math.max(0, rawMfnRate);
+  const effectiveMfnRate = usmcaApplied ? 0 : rawMfnRate;
 
   const applySec301 = input.applySec301 !== undefined ? Boolean(input.applySec301) : country.sec301Eligible;
   const rawSec301Rate = input.sec301Rate !== undefined && input.sec301Rate !== '' && input.sec301Rate !== null
     ? Number(input.sec301Rate)
     : (preset ? preset.sec301Rate : 0);
-  const effectiveSec301Rate = (country.sec301Eligible && applySec301) ? Math.max(0, rawSec301Rate) : 0;
+  assertNonNegFinite(rawSec301Rate, 'Section 301 rate');
+  const effectiveSec301Rate = (country.sec301Eligible && applySec301) ? rawSec301Rate : 0;
 
   const applySec232 = input.applySec232 !== undefined
     ? Boolean(input.applySec232)
@@ -469,9 +509,13 @@ function calculateShipment(input) {
   const rawSec232Rate = input.sec232Rate !== undefined && input.sec232Rate !== '' && input.sec232Rate !== null
     ? Number(input.sec232Rate)
     : (preset ? preset.sec232Rate : 0);
-  const effectiveSec232Rate = applySec232 ? Math.max(0, rawSec232Rate) : 0;
+  assertNonNegFinite(rawSec232Rate, 'Section 232 rate');
+  const effectiveSec232Rate = applySec232 ? rawSec232Rate : 0;
 
-  const extraTariffRate = Math.max(0, Number(input.extraTariffRate || 0));
+  const extraTariffRate = input.extraTariffRate === '' || input.extraTariffRate === undefined || input.extraTariffRate === null
+    ? 0
+    : Number(input.extraTariffRate);
+  assertNonNegFinite(extraTariffRate, 'Extra tariff rate');
 
   const mfnDuty = round2(customsValue * (effectiveMfnRate / 100));
   const sec301Duty = round2(customsValue * (effectiveSec301Rate / 100));
@@ -479,15 +523,16 @@ function calculateShipment(input) {
   const extraDuty = round2(customsValue * (extraTariffRate / 100));
   const totalDuty = round2(mfnDuty + sec301Duty + sec232Duty + extraDuty);
 
-  // Formal vs Informal CBP Entry
-  // Formal entry required above $2,500 OR if Section 301/232 trade remedies apply (or forced by user)
   const hasTradeRemedy = effectiveSec301Rate > 0 || effectiveSec232Rate > 0;
   const entryType = (input.forceFormalEntry || customsValue > CBP_RULES.formalThresholdUsd || hasTradeRemedy)
     ? 'formal'
     : 'informal';
 
   let mpfFee = 0;
-  if (usmcaApplied) {
+  if (input.mpfOverrideUsd !== undefined && input.mpfOverrideUsd !== null) {
+    assertNonNegFinite(Number(input.mpfOverrideUsd), 'MPF override');
+    mpfFee = round2(Number(input.mpfOverrideUsd));
+  } else if (usmcaApplied) {
     mpfFee = 0; // 19 CFR 24.23(c)(3) USMCA MPF exemption
   } else if (entryType === 'formal') {
     const rawMpf = customsValue * CBP_RULES.mpfFormalRate;
@@ -501,17 +546,18 @@ function calculateShipment(input) {
   const totalDutiesAndFees = round2(totalDuty + totalCbpFees);
 
   const totalLandedCost = round2(customsValue + freight + insurance + brokerFee + totalDutiesAndFees);
-  const landedCostPerUnit = round2(totalLandedCost / quantity);
+  const exactUnitLanded = totalLandedCost / quantity;
+  const landedCostPerUnit = round2(exactUnitLanded);
   const dutyPerUnit = round2(totalDutiesAndFees / quantity);
   const effectiveDutyRatePct = customsValue > 0 ? round2((totalDuty / customsValue) * 100) : 0;
   const effectiveAllInTaxPct = customsValue > 0 ? round2((totalDutiesAndFees / customsValue) * 100) : 0;
 
-  const recommendedDdpPrice = round2(landedCostPerUnit / (1 - targetMarginPct / 100));
-  const currentMarginPct = (currentRetailPrice && currentRetailPrice > 0)
-    ? round2(((currentRetailPrice - landedCostPerUnit) / currentRetailPrice) * 100)
+  const recommendedDdpPrice = round2(exactUnitLanded / (1 - targetMarginPct / 100));
+  const currentMarginPct = (currentRetailPrice !== null && currentRetailPrice > 0)
+    ? round2(((currentRetailPrice - exactUnitLanded) / currentRetailPrice) * 100)
     : null;
-  const currentProfitPerUnit = (currentRetailPrice !== null && Number.isFinite(currentRetailPrice))
-    ? round2(currentRetailPrice - landedCostPerUnit)
+  const currentProfitPerUnit = (currentRetailPrice !== null)
+    ? round2(currentRetailPrice - exactUnitLanded)
     : null;
 
   const warnings = [];
@@ -521,7 +567,7 @@ function calculateShipment(input) {
   if (effectiveSec232Rate > 0) {
     warnings.push(`Section 232 steel/aluminum derivative tariff (${effectiveSec232Rate}%) applied.`);
   }
-  if (entryType === 'formal' && customsValue <= CBP_RULES.formalThresholdUsd && hasTradeRemedy) {
+  if (entryType === 'formal' && customsValue <= CBP_RULES.formalThresholdUsd && hasTradeRemedy && !usmcaApplied) {
     warnings.push(`Formal entry MPF ($${mpfFee.toFixed(2)}) triggered because Section 301/232 goods are excluded from informal/de minimis entry.`);
   }
   if (usmcaApplied) {
@@ -578,7 +624,8 @@ function calculateShipment(input) {
 }
 
 /**
- * RFC 4180 CSV parser preserving physical 1-based line numbers & stripping UTF-8 BOM.
+ * RFC 4180 CSV parser preserving physical 1-based line numbers, stripping UTF-8 BOM,
+ * and catching unclosed quoted fields instead of silently truncating rows.
  */
 function parseCsv(text) {
   const src = String(text || '').replace(/^\uFEFF/, '');
@@ -586,6 +633,7 @@ function parseCsv(text) {
   let row = [];
   let field = '';
   let inQuotes = false;
+  let fieldStart = true;
   let line = 1;
   let rowStartLine = 1;
 
@@ -603,15 +651,18 @@ function parseCsv(text) {
         if (ch === '\n') line += 1;
         field += ch;
       }
-    } else if (ch === '"') {
+    } else if (ch === '"' && fieldStart) {
       inQuotes = true;
+      fieldStart = false;
     } else if (ch === ',') {
       row.push(field.trim());
       field = '';
+      fieldStart = true;
     } else if (ch === '\r' || ch === '\n') {
       if (ch === '\r' && src[i + 1] === '\n') i += 1;
       row.push(field.trim());
       field = '';
+      fieldStart = true;
       if (row.some((c) => c !== '')) {
         rows.push({ line: rowStartLine, cells: row });
       }
@@ -620,19 +671,27 @@ function parseCsv(text) {
       rowStartLine = line;
     } else {
       field += ch;
+      fieldStart = false;
     }
+  }
+  if (inQuotes) {
+    return { rows: [], error: `Malformed CSV: unclosed quoted field starting near line ${rowStartLine}.` };
   }
   row.push(field.trim());
   if (row.some((c) => c !== '')) {
     rows.push({ line: rowStartLine, cells: row });
   }
-  return rows;
+  return { rows, error: null };
 }
 
 function parseMoney(raw, fallback = 0) {
   if (raw === undefined || raw === null || String(raw).trim() === '') return fallback;
-  const cleaned = String(raw).replace(/[$,%\s]/g, '');
-  const num = Number(cleaned);
+  const trimmed = String(raw).trim().replace(/^[$€£¥\s]+|[%\s]+$/g, '');
+  // Allow optional thousands commas (e.g. 1,250.50 or 2,000) while rejecting malformed comma groups
+  if (trimmed.includes(',') && !/^-?\d{1,3}(,\d{3})+(\.\d+)?$/.test(trimmed)) {
+    return NaN;
+  }
+  const num = Number(trimmed.replace(/,/g, ''));
   return Number.isFinite(num) ? num : NaN;
 }
 
@@ -665,6 +724,12 @@ function mapHeaderIndex(headers) {
   };
 }
 
+function escCsvCell(v, guardFormula = false) {
+  let s = String(v ?? '');
+  if (guardFormula && /^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
 function analyzeBatchCsv(csvText, options = {}) {
   const {
     isPro = false,
@@ -672,40 +737,56 @@ function analyzeBatchCsv(csvText, options = {}) {
     defaultTargetMarginPct = 60,
     defaultShippingMode = 'ocean',
     defaultBrokerFee = 0,
+    entryBasis = 'consolidated', // 'consolidated' (pro-rata single entry MPF) or 'separate' (per-SKU entry)
   } = options;
 
-  const parsed = parseCsv(csvText);
+  const errors = [];
+  if (!Number.isFinite(Number(defaultTargetMarginPct)) || Number(defaultTargetMarginPct) < 0 || Number(defaultTargetMarginPct) >= 99) {
+    errors.push({ line: 0, message: 'Target DDP Margin must be between 0% and 98.9%.' });
+  }
+  if (!Number.isFinite(Number(defaultExtraTariffRate)) || Number(defaultExtraTariffRate) < 0) {
+    errors.push({ line: 0, message: 'Default Extra Tariff Rate must be >= 0%.' });
+  }
+  if (!Number.isFinite(Number(defaultBrokerFee)) || Number(defaultBrokerFee) < 0) {
+    errors.push({ line: 0, message: 'Broker Fee must be >= $0.' });
+  }
+  const cleanDefaultMode = normalizeShippingMode(defaultShippingMode);
+  if (!cleanDefaultMode) {
+    errors.push({ line: 0, message: `Unsupported default shipping mode: "${defaultShippingMode}".` });
+  }
+  if (errors.length > 0) {
+    return {
+      totalSkus: 0, visibleSkus: 0, truncatedCount: 0, entryBasis,
+      errors, rows: [], summary: null, exportBlocked: true, exportCsv: null, runbookMd: null,
+    };
+  }
+
+  const { rows: parsed, error: csvErr } = parseCsv(csvText);
+  if (csvErr) {
+    return {
+      totalSkus: 0, visibleSkus: 0, truncatedCount: 0, entryBasis,
+      errors: [{ line: 1, message: csvErr }],
+      rows: [], summary: null, exportBlocked: true, exportCsv: null, runbookMd: null,
+    };
+  }
   if (parsed.length < 2) {
     return {
-      totalSkus: 0,
-      visibleSkus: 0,
-      truncatedCount: 0,
+      totalSkus: 0, visibleSkus: 0, truncatedCount: 0, entryBasis,
       errors: [{ line: 1, message: 'Paste or upload a CSV with a header row and at least 1 SKU row.' }],
-      rows: [],
-      summary: null,
-      exportBlocked: true,
-      exportCsv: null,
-      runbookMd: null,
+      rows: [], summary: null, exportBlocked: true, exportCsv: null, runbookMd: null,
     };
   }
 
   const col = mapHeaderIndex(parsed[0].cells);
   if (col.unitCost === -1) {
     return {
-      totalSkus: 0,
-      visibleSkus: 0,
-      truncatedCount: 0,
+      totalSkus: 0, visibleSkus: 0, truncatedCount: 0, entryBasis,
       errors: [{ line: parsed[0].line, message: 'Missing required "Unit Cost" (or "FOB" / "Cost") column in CSV header.' }],
-      rows: [],
-      summary: null,
-      exportBlocked: true,
-      exportCsv: null,
-      runbookMd: null,
+      rows: [], summary: null, exportBlocked: true, exportCsv: null, runbookMd: null,
     };
   }
 
-  const errors = [];
-  const computed = [];
+  const validInputs = [];
 
   for (let i = 1; i < parsed.length; i += 1) {
     const { line, cells } = parsed[i];
@@ -716,7 +797,14 @@ function analyzeBatchCsv(csvText, options = {}) {
     const rawOrigin = get(col.origin) || 'CN';
     const origin = normalizeCountry(rawOrigin);
     if (!origin) {
-      errors.push({ line, sku, message: `Line ${line} (${sku}): Unrecognized Country of Origin "${rawOrigin}". Use 2-letter ISO code (e.g. CN, VN, MX, CA, DE).` });
+      errors.push({ line, sku, message: `Line ${line} (${sku}): Unrecognized Country of Origin "${rawOrigin}". Use 2-letter ISO code (e.g. CN, HK, VN, MX, CA, DE).` });
+      continue;
+    }
+
+    const rawMode = get(col.mode);
+    const mode = rawMode ? normalizeShippingMode(rawMode) : cleanDefaultMode;
+    if (!mode) {
+      errors.push({ line, sku, message: `Line ${line} (${sku}): Unrecognized Shipping Mode "${rawMode}". Use ocean, air, courier, or truck.` });
       continue;
     }
 
@@ -750,27 +838,98 @@ function analyzeBatchCsv(csvText, options = {}) {
     }
 
     const htsCode = get(col.hts) || 'CUSTOM';
-    const mode = (get(col.mode) || defaultShippingMode || 'ocean').toLowerCase();
     const usmcaQualifying = col.usmca !== -1 ? parseBoolCell(get(col.usmca)) : false;
 
-    const calc = calculateShipment({
-      title,
-      origin,
-      htsCode,
-      unitCost,
-      quantity,
-      freight,
-      brokerFee: defaultBrokerFee,
-      shippingMode: mode,
-      mfnRate,
-      extraTariffRate: defaultExtraTariffRate,
-      targetMarginPct: defaultTargetMarginPct,
-      currentRetailPrice: retailPrice,
-      usmcaQualifying,
+    validInputs.push({
+      line, sku, title, origin, htsCode, unitCost, quantity, freight,
+      shippingMode: mode, mfnRate, retailPrice, usmcaQualifying,
+    });
+  }
+
+  // First pass: calculate base per-SKU duty to know USMCA & trade-remedy flags
+  let mpfByIndex = null;
+  let forceConsolidatedFormal = false;
+
+  if (entryBasis === 'consolidated' && validInputs.length > 0) {
+    const prelim = validInputs.map((v) => calculateShipment({
+      title: v.title, origin: v.origin, htsCode: v.htsCode, unitCost: v.unitCost,
+      quantity: v.quantity, freight: v.freight, brokerFee: 0, shippingMode: v.shippingMode,
+      mfnRate: v.mfnRate, extraTariffRate: Number(defaultExtraTariffRate),
+      targetMarginPct: Number(defaultTargetMarginPct), currentRetailPrice: v.retailPrice,
+      usmcaQualifying: v.usmcaQualifying,
+    }));
+
+    const nonUsmcaIndices = [];
+    let nonUsmcaValue = 0;
+    let anyTradeRemedy = false;
+    prelim.forEach((p, idx) => {
+      if (!p.usmcaApplied) {
+        nonUsmcaIndices.push(idx);
+        nonUsmcaValue += p.customsValue;
+        if (p.rates.sec301 > 0 || p.rates.sec232 > 0) anyTradeRemedy = true;
+      }
     });
 
-    computed.push({ line, sku, title, ...calc });
+    mpfByIndex = new Array(validInputs.length).fill(0);
+    if (nonUsmcaIndices.length > 0) {
+      const isFormalEntry = nonUsmcaValue > CBP_RULES.formalThresholdUsd || anyTradeRemedy;
+      forceConsolidatedFormal = isFormalEntry;
+      const totalEntryMpf = isFormalEntry
+        ? round2(Math.min(CBP_RULES.mpfFormalMax, Math.max(CBP_RULES.mpfFormalMin, nonUsmcaValue * CBP_RULES.mpfFormalRate)))
+        : CBP_RULES.mpfInformalFee;
+
+      // Allocate entry MPF pro-rata by customs value with cent-exact reconciliation
+      let allocated = 0;
+      nonUsmcaIndices.forEach((idx, pos) => {
+        if (pos === nonUsmcaIndices.length - 1) {
+          mpfByIndex[idx] = round2(totalEntryMpf - allocated);
+        } else {
+          const share = nonUsmcaValue > 0
+            ? round2(totalEntryMpf * (prelim[idx].customsValue / nonUsmcaValue))
+            : round2(totalEntryMpf / nonUsmcaIndices.length);
+          mpfByIndex[idx] = share;
+          allocated = round2(allocated + share);
+        }
+      });
+    }
   }
+
+  // Allocate broker fee pro-rata when consolidated, or per SKU when separate
+  const totalFobAll = validInputs.reduce((s, v) => s + round2(v.unitCost * v.quantity), 0);
+  const brokerByIndex = validInputs.map((v, idx) => {
+    const fee = Number(defaultBrokerFee);
+    if (entryBasis !== 'consolidated' || fee === 0) return fee;
+    if (idx === validInputs.length - 1) {
+      const prevSum = validInputs.slice(0, -1).reduce((s, pv) => {
+        const fob = round2(pv.unitCost * pv.quantity);
+        return round2(s + (totalFobAll > 0 ? round2(fee * (fob / totalFobAll)) : round2(fee / validInputs.length)));
+      }, 0);
+      return round2(fee - prevSum);
+    }
+    const fob = round2(v.unitCost * v.quantity);
+    return totalFobAll > 0 ? round2(fee * (fob / totalFobAll)) : round2(fee / validInputs.length);
+  });
+
+  const computed = validInputs.map((v, idx) => {
+    const calc = calculateShipment({
+      title: v.title,
+      origin: v.origin,
+      htsCode: v.htsCode,
+      unitCost: v.unitCost,
+      quantity: v.quantity,
+      freight: v.freight,
+      brokerFee: brokerByIndex[idx],
+      shippingMode: v.shippingMode,
+      mfnRate: v.mfnRate,
+      extraTariffRate: Number(defaultExtraTariffRate),
+      targetMarginPct: Number(defaultTargetMarginPct),
+      currentRetailPrice: v.retailPrice,
+      usmcaQualifying: v.usmcaQualifying,
+      forceFormalEntry: entryBasis === 'consolidated' ? forceConsolidatedFormal : false,
+      mpfOverrideUsd: mpfByIndex ? mpfByIndex[idx] : null,
+    });
+    return { line: v.line, sku: v.sku, title: v.title, ...calc };
+  });
 
   const totalCustoms = round2(computed.reduce((s, r) => s + r.customsValue, 0));
   const totalDuties = round2(computed.reduce((s, r) => s + r.breakdown.totalDuty, 0));
@@ -782,6 +941,8 @@ function analyzeBatchCsv(csvText, options = {}) {
 
   const summary = {
     skuCount: computed.length,
+    excludedErrorCount: errors.length,
+    entryBasis,
     totalCustoms,
     totalDuties,
     totalCbpFees,
@@ -807,21 +968,18 @@ function analyzeBatchCsv(csvText, options = {}) {
       'Total Landed ($)', 'Landed Cost / Unit ($)', 'Current Retail ($)',
       'Current Net Margin %', 'Recommended DDP Price ($)',
     ];
-    const esc = (v) => {
-      const s = String(v ?? '');
-      return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
     const lines = [
       csvCols.join(','),
       ...computed.map((r) => [
-        r.sku, r.title, r.origin, r.htsCode, r.shippingMode, r.entryType, r.quantity, r.unitCost.toFixed(2),
-        r.customsValue.toFixed(2), r.rates.mfn, r.rates.sec301, r.rates.sec232, r.rates.extra,
-        r.breakdown.totalDuty.toFixed(2), r.breakdown.mpfFee.toFixed(2), r.breakdown.hmfFee.toFixed(2), r.freight.toFixed(2),
-        r.totalLandedCost.toFixed(2), r.landedCostPerUnit.toFixed(2),
-        r.currentRetailPrice !== null ? r.currentRetailPrice.toFixed(2) : '',
-        r.currentMarginPct !== null ? r.currentMarginPct.toFixed(1) : '',
-        r.recommendedDdpPrice.toFixed(2),
-      ].map(esc).join(',')),
+        escCsvCell(r.sku, true), escCsvCell(r.title, true), escCsvCell(r.origin), escCsvCell(r.htsCode, true),
+        escCsvCell(r.shippingMode), escCsvCell(r.entryType), escCsvCell(r.quantity), escCsvCell(r.unitCost.toFixed(2)),
+        escCsvCell(r.customsValue.toFixed(2)), escCsvCell(r.rates.mfn), escCsvCell(r.rates.sec301), escCsvCell(r.rates.sec232), escCsvCell(r.rates.extra),
+        escCsvCell(r.breakdown.totalDuty.toFixed(2)), escCsvCell(r.breakdown.mpfFee.toFixed(2)), escCsvCell(r.breakdown.hmfFee.toFixed(2)), escCsvCell(r.freight.toFixed(2)),
+        escCsvCell(r.totalLandedCost.toFixed(2)), escCsvCell(r.landedCostPerUnit.toFixed(2)),
+        escCsvCell(r.currentRetailPrice !== null ? r.currentRetailPrice.toFixed(2) : ''),
+        escCsvCell(r.currentMarginPct !== null ? r.currentMarginPct.toFixed(1) : ''),
+        escCsvCell(r.recommendedDdpPrice.toFixed(2)),
+      ].join(',')),
     ];
     exportCsv = lines.join('\r\n');
 
@@ -834,6 +992,7 @@ function analyzeBatchCsv(csvText, options = {}) {
       '# US Import Duty & DDP Pricing Runbook',
       '',
       `- **SKUs Analyzed:** ${summary.skuCount}`,
+      `- **Customs Entry Basis:** ${entryBasis === 'consolidated' ? 'Single Consolidated Entry (pro-rata CBP MPF & broker fee)' : 'Separate Entry per SKU'}`,
       `- **Total FOB Customs Value:** $${summary.totalCustoms.toLocaleString('en-US', { minimumFractionDigits: 2 })}`,
       `- **Total US Duties (MFN + Sec 301/232 + Scenario):** $${summary.totalDuties.toLocaleString('en-US', { minimumFractionDigits: 2 })} (${summary.blendedDutyPct}% blended)`,
       `- **Total CBP Fees (MPF + HMF):** $${summary.totalCbpFees.toLocaleString('en-US', { minimumFractionDigits: 2 })}`,
@@ -858,6 +1017,7 @@ function analyzeBatchCsv(csvText, options = {}) {
     totalSkus: computed.length,
     visibleSkus: visibleRows.length,
     truncatedCount,
+    entryBasis,
     errors,
     rows: visibleRows,
     summary,
@@ -898,6 +1058,16 @@ function analyzeBatchCsv(csvText, options = {}) {
       document.getElementById('mfnRate').value = p.mfnRate;
       document.getElementById('sec301Rate').value = originSel.value === 'CN' ? p.sec301Rate : 0;
       document.getElementById('sec232Rate').value = p.sec232Rate;
+      recalcSingle();
+    }
+
+    function applyOriginChange() {
+      const p = findPreset(presetSel.value);
+      if (originSel.value === 'CN') {
+        document.getElementById('sec301Rate').value = p ? p.sec301Rate : document.getElementById('sec301Rate').value;
+      } else {
+        document.getElementById('sec301Rate').value = 0;
+      }
       recalcSingle();
     }
 
@@ -961,7 +1131,7 @@ function analyzeBatchCsv(csvText, options = {}) {
     }
 
     presetSel.addEventListener('change', applyPresetRates);
-    originSel.addEventListener('change', applyPresetRates);
+    originSel.addEventListener('change', applyOriginChange);
     ['modeSelect','unitCost','quantity','freight','insurance','brokerFee','mfnRate','sec301Rate','sec232Rate','extraRate','targetMargin','currentRetail','usmcaCheck']
       .forEach((id) => document.getElementById(id).addEventListener('input', recalcSingle));
     recalcSingle();
@@ -982,6 +1152,7 @@ function analyzeBatchCsv(csvText, options = {}) {
       const text = document.getElementById('batchCsvText').value;
       const res = analyzeBatchCsv(text, {
         isPro: IS_PRO,
+        entryBasis: document.getElementById('batchEntryBasis').value,
         defaultExtraTariffRate: Number(document.getElementById('batchExtraRate').value || 0),
         defaultTargetMarginPct: Number(document.getElementById('batchMargin').value || 60),
         defaultShippingMode: document.getElementById('batchMode').value,
@@ -990,6 +1161,9 @@ function analyzeBatchCsv(csvText, options = {}) {
       lastBatch = res;
 
       const alerts = [];
+      if (res.errors.length && res.rows.length) {
+        alerts.push(`<div class="alert alert-err"><strong>Export blocked:</strong> ${res.errors.length} row error(s) found. Summary totals below exclude invalid rows until fixed.</div>`);
+      }
       for (const e of res.errors) alerts.push(`<div class="alert alert-err">${esc(e.message)}</div>`);
       if (res.truncatedCount > 0) {
         alerts.push(`<div class="alert alert-warn">Showing first ${res.visibleSkus} of ${res.totalSkus} SKUs (${res.truncatedCount} hidden in Free Preview). Upgrade to Offline Pro ($19) for unlimited SKU exports.</div>`);
