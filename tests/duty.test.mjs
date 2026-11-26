@@ -207,3 +207,40 @@ test('USMCA preference, Sec 232 stacking, thousands commas, mode aliases, and CS
   assert.equal(res.rows[0].shippingMode, 'ocean');
   assert.equal(res.rows[1].breakdown.mpfFee, 0);
 });
+
+test('Fuzz & 5k-SKU scale invariants: 200 randomized batches produce 0 NaNs, non-negative MPF, and exact FY2027 cap', () => {
+  let rng = 20261126;
+  const rand = () => ((rng = (rng * 1664525 + 1013904223) >>> 0) / 4294967296);
+  const codes = ['CN', 'HK', 'VN', 'MX', 'CA', 'DE', 'KR', 'IN'];
+  const htsList = ['6109.10.00', '8544.42.90', '9617.00.10', '7318.15.80', '3304.99.50', '4202.21.90'];
+  const modes = ['ocean', 'air', 'courier', 'truck', 'Sea', 'DHL'];
+
+  for (let c = 0; c < 200; c++) {
+    const n = 1 + Math.floor(rand() * 40);
+    const lines = ['SKU,Product,Origin,HTS,Unit Cost,Qty,Freight,Mode,Retail Price,USMCA'];
+    for (let i = 0; i < n; i++) {
+      lines.push(`S${i},Item ${i},${codes[Math.floor(rand() * codes.length)]},${htsList[Math.floor(rand() * htsList.length)]},${(0.5 + rand() * 200).toFixed(2)},${1 + Math.floor(rand() * 200)},${(rand() * 200).toFixed(2)},${modes[Math.floor(rand() * modes.length)]},${(20 + rand() * 300).toFixed(2)},${rand() < 0.25 ? 'yes' : 'no'}`);
+    }
+    const r = analyzeBatchCsv(lines.join('\n'), {
+      isPro: true,
+      entryBasis: rand() < 0.5 ? 'consolidated' : 'separate',
+      entryDate: rand() < 0.5 ? '2026-11-25' : '2026-08-01',
+      defaultBrokerFee: Math.round(rand() * 200),
+    });
+    assert.equal(r.errors.length, 0);
+    for (const row of r.rows) {
+      assert.ok(Number.isFinite(row.totalLandedCost) && row.totalLandedCost >= 0);
+      assert.ok(Number.isFinite(row.breakdown.mpfFee) && row.breakdown.mpfFee >= 0);
+    }
+  }
+
+  const bigLines = ['SKU,Product,Origin,HTS,Unit Cost,Qty,Freight,Mode,Retail Price,USMCA'];
+  for (let i = 0; i < 5000; i++) {
+    bigLines.push(`B-${i},Item ${i},VN,6109.10.00,10.00,10,5,ocean,35.00,no`);
+  }
+  const big = analyzeBatchCsv(bigLines.join('\n'), { isPro: true, entryBasis: 'consolidated', entryDate: '2026-11-25' });
+  assert.equal(big.errors.length, 0);
+  const totalMpfCents = big.rows.reduce((s, r) => s + Math.round(r.breakdown.mpfFee * 100), 0);
+  assert.equal(totalMpfCents, 67086); // Exact FY2027 formal cap $670.86
+});
+

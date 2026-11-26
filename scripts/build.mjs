@@ -330,6 +330,10 @@ function renderHtml({ isPro }) {
           <tbody id="batchTableBody"></tbody>
         </table>
       </div>
+      <div id="batchPager" class="hidden" style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px;font-size:13px;color:var(--muted);">
+        <span id="batchPagerInfo"></span>
+        <button id="btnMoreSkus" class="btn" type="button" style="height:34px;font-size:13px;">Show next 250 SKUs</button>
+      </div>
       ${isPro ? '' : `
       <div id="proBanner" class="pro-banner">
         <div>
@@ -479,7 +483,10 @@ function renderHtml({ isPro }) {
     }));
 
     // Batch analyzer
+    const BATCH_PAGE_SIZE = 250;
     let lastBatch = null;
+    let batchVisibleLimit = BATCH_PAGE_SIZE;
+
     function invalidateBatch(reason = 'Batch inputs changed — click "Analyze Batch SKUs" to refresh results before exporting.') {
       if (IS_PRO) {
         document.getElementById('btnDlCsv').disabled = true;
@@ -498,8 +505,40 @@ function renderHtml({ isPro }) {
       el.addEventListener('change', () => invalidateBatch());
     });
 
+    function renderBatchRows(res) {
+      const slice = res.rows.slice(0, batchVisibleLimit);
+      document.getElementById('batchTableBody').innerHTML = slice.map((r) => {
+        const mPill = r.currentMarginPct === null ? '—'
+          : \`<span class="pill \${r.currentMarginPct < 30 ? 'pill-bad' : 'pill-ok'}">\${r.currentMarginPct.toFixed(1)}%</span>\`;
+        return \`<tr>
+          <td><strong>\${esc(r.sku)}</strong><div style="color:var(--muted);font-size:12px;">\${esc(r.title)}</div></td>
+          <td class="mono">\${esc(r.origin)} · \${esc(r.htsCode)}<div style="color:var(--muted);font-size:11.5px;">\${esc(r.shippingMode)} (\${esc(r.entryType)})</div></td>
+          <td class="mono">\${money(r.customsValue)}<div style="color:var(--muted);font-size:11.5px;">\${r.quantity} × \${money(r.unitCost)}</div></td>
+          <td class="mono">\${money(r.breakdown.totalDuty)}<div style="color:var(--muted);font-size:11.5px;">\${r.rates.combinedDutyPct}% total</div></td>
+          <td class="mono">\${money(r.breakdown.totalCbpFees)}<div style="color:var(--muted);font-size:11.5px;">MPF \${money(r.breakdown.mpfFee)}</div></td>
+          <td class="mono"><strong>\${money(r.landedCostPerUnit)}</strong></td>
+          <td>\${mPill}</td>
+          <td class="mono"><strong>\${money(r.recommendedDdpPrice)}</strong></td>
+        </tr>\`;
+      }).join('');
+      const pager = document.getElementById('batchPager');
+      if (res.rows.length > slice.length) {
+        pager.classList.remove('hidden');
+        document.getElementById('batchPagerInfo').textContent = \`Showing \${slice.length.toLocaleString()} of \${res.rows.length.toLocaleString()} SKUs (exports include all \${res.totalSkus.toLocaleString()} SKUs)\`;
+      } else {
+        pager.classList.add('hidden');
+      }
+    }
+
+    document.getElementById('btnMoreSkus').addEventListener('click', () => {
+      if (!lastBatch) return;
+      batchVisibleLimit += BATCH_PAGE_SIZE;
+      renderBatchRows(lastBatch);
+    });
+
     function runBatch() {
       const text = document.getElementById('batchCsvText').value;
+      batchVisibleLimit = BATCH_PAGE_SIZE;
       const res = analyzeBatchCsv(text, {
         isPro: IS_PRO,
         entryDate: document.getElementById('batchEntryDate').value || DEFAULT_ENTRY_DATE,
@@ -533,23 +572,11 @@ function renderHtml({ isPro }) {
           ['Total Landed Outlay', money(res.summary.totalLanded), \`\${res.summary.marginAlertSkus} margin alerts\`],
         ].map(([l, v, s]) => \`<div class="kpi"><div class="kpi-label">\${esc(l)}</div><div class="kpi-val mono" style="font-size:18px;">\${esc(v)}</div><div class="kpi-sub">\${esc(s)}</div></div>\`).join('');
 
-        document.getElementById('batchTableBody').innerHTML = res.rows.map((r) => {
-          const mPill = r.currentMarginPct === null ? '—'
-            : \`<span class="pill \${r.currentMarginPct < 30 ? 'pill-bad' : 'pill-ok'}">\${r.currentMarginPct.toFixed(1)}%</span>\`;
-          return \`<tr>
-            <td><strong>\${esc(r.sku)}</strong><div style="color:var(--muted);font-size:12px;">\${esc(r.title)}</div></td>
-            <td class="mono">\${esc(r.origin)} · \${esc(r.htsCode)}<div style="color:var(--muted);font-size:11.5px;">\${esc(r.shippingMode)} (\${esc(r.entryType)})</div></td>
-            <td class="mono">\${money(r.customsValue)}<div style="color:var(--muted);font-size:11.5px;">\${r.quantity} × \${money(r.unitCost)}</div></td>
-            <td class="mono">\${money(r.breakdown.totalDuty)}<div style="color:var(--muted);font-size:11.5px;">\${r.rates.combinedDutyPct}% total</div></td>
-            <td class="mono">\${money(r.breakdown.totalCbpFees)}<div style="color:var(--muted);font-size:11.5px;">MPF \${money(r.breakdown.mpfFee)}</div></td>
-            <td class="mono"><strong>\${money(r.landedCostPerUnit)}</strong></td>
-            <td>\${mPill}</td>
-            <td class="mono"><strong>\${money(r.recommendedDdpPrice)}</strong></td>
-          </tr>\`;
-        }).join('');
+        renderBatchRows(res);
       } else {
         sumEl.classList.add('hidden');
         wrapEl.classList.add('hidden');
+        document.getElementById('batchPager').classList.add('hidden');
       }
 
       if (IS_PRO) {
@@ -568,6 +595,7 @@ function renderHtml({ isPro }) {
       document.getElementById('batchAlerts').innerHTML = '';
       document.getElementById('batchSummary').classList.add('hidden');
       document.getElementById('batchTableWrap').classList.add('hidden');
+      document.getElementById('batchPager').classList.add('hidden');
       invalidateBatch('');
     });
     document.getElementById('csvFileInput').addEventListener('change', (ev) => {
