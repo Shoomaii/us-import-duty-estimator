@@ -139,7 +139,7 @@ function renderHtml({ isPro }) {
       <div>
         <div class="eyebrow">100% Client-Side · Zero Upload Privacy</div>
         <h1>US Import Duty &amp; Landed Cost Estimator</h1>
-        <p class="sub">Estimate Base USITC MFN duties, China Section 301, Section 232 steel/aluminum, exact CBP MPF ($32.71–$634.62 formal / $2.62 informal / $0 USMCA), Ocean HMF (0.125%), and DDP retail pricing.</p>
+        <p class="sub">Estimate Base USITC MFN duties, China Section 301, Section 232 steel/aluminum, entry-date-versioned CBP MPF (FY2027: $34.58–$670.86 formal / $2.77 informal / $0 USMCA), Ocean HMF (0.125%), and DDP retail pricing.</p>
       </div>
       <div class="badge">${isPro ? 'Offline Pro Edition · Unlimited SKUs' : 'Free Web Preview · 5-SKU Batch Limit'}</div>
     </header>
@@ -157,6 +157,10 @@ function renderHtml({ isPro }) {
           <div style="grid-column: span 2;">
             <label for="presetSelect">Product Category / HTS Preset</label>
             <select id="presetSelect"></select>
+          </div>
+          <div>
+            <label for="entryDate">CBP Entry Date (MPF FY)</label>
+            <input id="entryDate" type="date" value="2026-11-25" />
           </div>
           <div>
             <label for="originSelect">Country of Origin (Manufacture)</label>
@@ -264,6 +268,10 @@ function renderHtml({ isPro }) {
       </div>
       <div class="form-grid" style="margin-bottom:12px;">
         <div>
+          <label for="batchEntryDate">CBP Entry Date (MPF FY)</label>
+          <input id="batchEntryDate" type="date" value="2026-11-25" />
+        </div>
+        <div>
           <label for="batchEntryBasis">Customs Entry Basis</label>
           <select id="batchEntryBasis">
             <option value="consolidated" selected>Single Consolidated Entry (Pro-Rata MPF)</option>
@@ -292,7 +300,7 @@ function renderHtml({ isPro }) {
           <input id="batchBroker" type="number" step="1" min="0" value="0" />
         </div>
       </div>
-      <label for="batchCsvText">Paste Supplier / Shopify SKU CSV (Columns: SKU, Product, Origin, HTS, Unit Cost, Qty, Freight, Mode, Retail Price, USMCA)</label>
+      <label for="batchCsvText">Paste Supplier / Shopify SKU CSV (Columns: SKU, Product, Origin, HTS, Unit Cost, Qty, Freight, Mode, Base Rate, Retail Price, USMCA)</label>
       <textarea id="batchCsvText" spellcheck="false" placeholder="SKU,Product,Origin,HTS,Unit Cost,Qty,Freight,Mode,Retail Price,USMCA&#10;TEE-BLK-M,Cotton Tee,CN,6109.10.00,6.50,400,480,ocean,24.00,no"></textarea>
       <div class="btn-row">
         <button id="btnAnalyzeBatch" class="btn btn-primary" type="button">Analyze Batch SKUs</button>
@@ -328,13 +336,13 @@ function renderHtml({ isPro }) {
           <strong>Need Unlimited SKUs + Shopify/ERP Landed Cost CSV &amp; DDP Runbook Exports?</strong>
           <div style="font-size:13.5px;color:var(--muted);">Free web preview shows the first 5 SKUs. Get the <strong>Offline Pro Single-File HTML ($19 one-time)</strong> — runs 100% locally with zero subscription, unlimited SKUs, and 1-click CSV + Markdown runbook exports.</div>
         </div>
-        <a class="btn btn-primary" href="https://github.com/Shoomaii/us-import-duty-estimator#offline-pro-edition-19" target="_blank" rel="noopener">Get Offline Pro ($19)</a>
+        <a class="btn btn-primary" href="${process.env.PRO_CHECKOUT_URL || 'mailto:jshoomaii@gmail.com?subject=US%20Import%20Duty%20Estimator%20Offline%20Pro%20(%2419)&body=Hi%2C%20please%20send%20the%20checkout%20link%20for%20the%20US%20Import%20Duty%20Estimator%20Offline%20Pro%20HTML%20(%2419).'}" ${process.env.PRO_CHECKOUT_URL ? 'target="_blank" rel="noopener"' : ''}>Get Offline Pro ($19)</a>
       </div>
       `}
     </section>
 
     <footer>
-      Reference estimator based on USITC HTS Column 1 MFN, Chapter 99 Section 301/232, and CBP MPF/HMF rules (19 CFR 24.23). Always confirm binding 10-digit HTS rulings and active executive tariff proclamations with a licensed US customs broker.
+      Reference estimator based on USITC HTS Column 1 MFN, Chapter 99 Section 301/232, and entry-date-versioned CBP MPF/HMF rules (19 CFR 24.23; FY2027 Federal Register 2026-15530 Table 2). Always confirm binding 10-digit HTS rulings and active executive tariff proclamations with a licensed US customs broker.
     </footer>
   </div>
 
@@ -395,6 +403,7 @@ function renderHtml({ isPro }) {
 
       try {
         const res = calculateShipment({
+          entryDate: document.getElementById('entryDate').value || DEFAULT_ENTRY_DATE,
           presetId: presetSel.value,
           origin,
           shippingMode: document.getElementById('modeSelect').value,
@@ -423,7 +432,7 @@ function renderHtml({ isPro }) {
         document.getElementById('kpiTotalTax').textContent = money(res.breakdown.totalDutiesAndFees);
         document.getElementById('kpiEffRate').textContent = \`\${res.effectiveAllInTaxPct.toFixed(1)}% of FOB value\`;
         document.getElementById('kpiTotalLanded').textContent = money(res.totalLandedCost);
-        document.getElementById('kpiEntryType').textContent = \`\${res.entryType.toUpperCase()} entry · \${res.quantity.toLocaleString()} units\`;
+        document.getElementById('kpiEntryType').textContent = \`\${res.entryType.toUpperCase()} (\${res.fiscalYear}) · \${res.quantity.toLocaleString()} units\`;
 
         document.getElementById('breakdownLines').innerHTML = [
           ['FOB Customs Value', money(res.customsValue)],
@@ -431,7 +440,7 @@ function renderHtml({ isPro }) {
           [\`China Section 301 (\${res.rates.sec301}%)\`, money(res.breakdown.sec301Duty)],
           [\`Section 232 Steel/Alum (\${res.rates.sec232}%)\`, money(res.breakdown.sec232Duty)],
           [\`Extra / Reciprocal Scenario (\${res.rates.extra}%)\`, money(res.breakdown.extraDuty)],
-          [\`CBP MPF (\${res.usmcaApplied ? 'USMCA Waived' : res.entryType})\`, money(res.breakdown.mpfFee)],
+          [\`CBP MPF (\${res.usmcaApplied ? 'USMCA Waived' : res.entryType + ' · ' + res.fiscalYear})\`, money(res.breakdown.mpfFee)],
           [\`Ocean HMF (\${res.shippingMode === 'ocean' ? '0.125%' : 'N/A'})\`, money(res.breakdown.hmfFee)],
           ['Freight + Insurance + Broker', money(res.freight + res.insurance + res.brokerFee)],
           ['Total Landed Cost', money(res.totalLandedCost), true],
@@ -446,7 +455,7 @@ function renderHtml({ isPro }) {
 
     presetSel.addEventListener('change', applyPresetRates);
     originSel.addEventListener('change', applyOriginChange);
-    ['modeSelect','unitCost','quantity','freight','insurance','brokerFee','mfnRate','sec301Rate','sec232Rate','extraRate','targetMargin','currentRetail','usmcaCheck']
+    ['entryDate','modeSelect','unitCost','quantity','freight','insurance','brokerFee','mfnRate','sec301Rate','sec232Rate','extraRate','targetMargin','currentRetail','usmcaCheck']
       .forEach((id) => document.getElementById(id).addEventListener('input', recalcSingle));
     recalcSingle();
 
@@ -466,6 +475,7 @@ function renderHtml({ isPro }) {
       const text = document.getElementById('batchCsvText').value;
       const res = analyzeBatchCsv(text, {
         isPro: IS_PRO,
+        entryDate: document.getElementById('batchEntryDate').value || DEFAULT_ENTRY_DATE,
         entryBasis: document.getElementById('batchEntryBasis').value,
         defaultExtraTariffRate: Number(document.getElementById('batchExtraRate').value || 0),
         defaultTargetMarginPct: Number(document.getElementById('batchMargin').value || 60),

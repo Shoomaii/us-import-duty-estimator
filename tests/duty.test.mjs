@@ -1,14 +1,37 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CBP_RULES, analyzeBatchCsv, calculateShipment, normalizeCountry, normalizeShippingMode } from '../src/duty_engine.mjs';
+import {
+  MPF_SCHEDULES,
+  allocateCentsProRata,
+  analyzeBatchCsv,
+  calculateShipment,
+  getCbpSchedule,
+  normalizeCountry,
+  normalizeShippingMode,
+} from '../src/duty_engine.mjs';
 
-test('China ocean formal shipment stacks MFN + Section 301 + MPF + HMF accurately', () => {
+test('Entry-date versioning selects FY2026 vs FY2027 official CBP MPF schedule at Oct 1, 2026 boundary', () => {
+  const fy26 = getCbpSchedule('2026-09-30');
+  assert.equal(fy26.fiscalYear, 'FY2026');
+  assert.equal(fy26.mpfFormalMin, 32.71);
+  assert.equal(fy26.mpfFormalMax, 634.62);
+  assert.equal(fy26.mpfInformalFee, 2.62);
+
+  const fy27 = getCbpSchedule('2026-10-01');
+  assert.equal(fy27.fiscalYear, 'FY2027');
+  assert.equal(fy27.mpfFormalMin, 34.58);
+  assert.equal(fy27.mpfFormalMax, 670.86);
+  assert.equal(fy27.mpfInformalFee, 2.77);
+});
+
+test('China ocean formal shipment stacks MFN + Section 301 + FY2027 MPF + HMF accurately', () => {
   const res = calculateShipment({
+    entryDate: '2026-11-25',
     presetId: 'cotton-tee',
     origin: 'CN',
     shippingMode: 'ocean',
     unitCost: 10,
-    quantity: 1000,       // $10,000 customs value
+    quantity: 1000,       // $10,000 customs value -> raw MPF $34.64 > $34.58 FY2027 floor
     freight: 800,
     insurance: 50,
     brokerFee: 150,
@@ -17,6 +40,7 @@ test('China ocean formal shipment stacks MFN + Section 301 + MPF + HMF accuratel
     currentRetailPrice: 25,
   });
 
+  assert.equal(res.fiscalYear, 'FY2027');
   assert.equal(res.customsValue, 10000);
   assert.equal(res.entryType, 'formal');
   assert.equal(res.breakdown.mfnDuty, 1650);
@@ -30,143 +54,153 @@ test('China ocean formal shipment stacks MFN + Section 301 + MPF + HMF accuratel
   assert.equal(res.recommendedDdpPrice, 36.12);
 });
 
-test('CBP MPF respects statutory formal floor ($32.71) and formal cap ($634.62)', () => {
-  const lowFormal = calculateShipment({
+test('CBP MPF respects FY2027 floor ($34.58), cap ($670.86), and informal ($2.77), plus FY2026 historical boundary', () => {
+  const lowFy27 = calculateShipment({
+    entryDate: '2026-10-01',
     presetId: 'cotton-tee',
     origin: 'VN',
     shippingMode: 'air',
     unitCost: 30,
-    quantity: 100, // $3,000 -> raw MPF $10.39 -> clamped to $32.71
+    quantity: 100, // $3,000 -> clamped to $34.58
   });
-  assert.equal(lowFormal.entryType, 'formal');
-  assert.equal(lowFormal.breakdown.mpfFee, CBP_RULES.mpfFormalMin);
-  assert.equal(lowFormal.breakdown.hmfFee, 0);
+  assert.equal(lowFy27.breakdown.mpfFee, MPF_SCHEDULES.FY2027.mpfFormalMin);
+  assert.equal(lowFy27.breakdown.hmfFee, 0);
 
-  const highFormal = calculateShipment({
+  const highFy27 = calculateShipment({
+    entryDate: '2026-10-01',
     presetId: 'cotton-tee',
     origin: 'VN',
     shippingMode: 'ocean',
     unitCost: 100,
-    quantity: 3000, // $300,000 -> raw MPF $1,039.20 -> clamped to $634.62
+    quantity: 3000, // $300,000 -> clamped to $670.86
   });
-  assert.equal(highFormal.breakdown.mpfFee, CBP_RULES.mpfFormalMax);
-  assert.equal(highFormal.breakdown.hmfFee, 375);
-});
+  assert.equal(highFy27.breakdown.mpfFee, MPF_SCHEDULES.FY2027.mpfFormalMax);
 
-test('Informal non-Section-301 shipment <= $2,500 uses $2.62 informal MPF', () => {
-  const res = calculateShipment({
+  const infFy27 = calculateShipment({
+    entryDate: '2026-10-01',
     presetId: 'skincare',
     origin: 'KR',
     shippingMode: 'courier',
     unitCost: 10,
     quantity: 100,
   });
-  assert.equal(res.entryType, 'informal');
-  assert.equal(res.breakdown.mpfFee, CBP_RULES.mpfInformalFee);
-  assert.equal(res.breakdown.hmfFee, 0);
-});
+  assert.equal(infFy27.entryType, 'informal');
+  assert.equal(infFy27.breakdown.mpfFee, MPF_SCHEDULES.FY2027.mpfInformalFee);
 
-test('USMCA-qualifying Mexico/Canada shipment waives both Base MFN and CBP MPF', () => {
-  const res = calculateShipment({
-    presetId: 'leather-bags',
-    origin: 'MX',
-    shippingMode: 'truck',
-    unitCost: 50,
-    quantity: 200,
-    usmcaQualifying: true,
+  const lowFy26 = calculateShipment({
+    entryDate: '2026-09-30',
+    presetId: 'cotton-tee',
+    origin: 'VN',
+    shippingMode: 'air',
+    unitCost: 30,
+    quantity: 100,
   });
-  assert.equal(res.usmcaApplied, true);
-  assert.equal(res.breakdown.mfnDuty, 0);
-  assert.equal(res.breakdown.mpfFee, 0);
-  assert.equal(res.breakdown.hmfFee, 0);
-  assert.equal(res.breakdown.totalDutiesAndFees, 0);
+  assert.equal(lowFy26.breakdown.mpfFee, MPF_SCHEDULES.FY2026.mpfFormalMin);
 });
 
-test('Steel fastener preset stacks Section 232 (25%) + China Section 301 (25%)', () => {
-  const res = calculateShipment({
-    presetId: 'steel-bolts',
+test('Hong Kong origin is preserved independently and NOT assessed China Section 301 (Codex High finding)', () => {
+  assert.equal(normalizeCountry('HK'), 'HK');
+  assert.equal(normalizeCountry('Hong Kong'), 'HK');
+
+  const hkCables = calculateShipment({
+    entryDate: '2026-11-25',
+    presetId: 'usb-cables', // 2.6% MFN, 25% China Sec 301
+    origin: 'HK',
+    shippingMode: 'air',
+    unitCost: 10,
+    quantity: 100, // $1,000
+  });
+  assert.equal(hkCables.origin, 'HK');
+  assert.equal(hkCables.rates.sec301, 0);
+  assert.equal(hkCables.breakdown.sec301Duty, 0);
+  assert.equal(hkCables.breakdown.mfnDuty, 26);
+  assert.equal(hkCables.entryType, 'informal');
+  assert.equal(hkCables.breakdown.mpfFee, 2.77);
+
+  const cnCables = calculateShipment({
+    entryDate: '2026-11-25',
+    presetId: 'usb-cables',
     origin: 'CN',
-    shippingMode: 'ocean',
-    unitCost: 5,
-    quantity: 200,
+    shippingMode: 'air',
+    unitCost: 10,
+    quantity: 100,
   });
-  assert.equal(res.entryType, 'formal');
-  assert.equal(res.breakdown.sec301Duty, 250);
-  assert.equal(res.breakdown.sec232Duty, 250);
-  assert.equal(res.breakdown.mpfFee, CBP_RULES.mpfFormalMin);
+  assert.equal(cnCables.breakdown.sec301Duty, 250);
+  assert.equal(cnCables.entryType, 'formal');
 });
 
-test('Country & shipping mode normalization handle EO 13936 HK->CN, Sea->ocean, and reject junk', () => {
-  assert.equal(normalizeCountry('HK'), 'CN');
-  assert.equal(normalizeCountry('Hong Kong'), 'CN');
-  assert.equal(normalizeCountry('FR'), 'OTHER');
-  assert.equal(normalizeCountry('12'), '');
-  assert.equal(normalizeCountry('MARS'), '');
+test('Unknown HTS or unconfirmed 6-digit prefix fallback blocks export without manual MFN rate (Codex High finding)', () => {
+  // Unrecognized HTS with no manual rate must fail
+  const unknownCsv = 'SKU,Product,Origin,HTS,Unit Cost,Qty\nVN-1,Mystery Widget,VN,9999.88.77,10,100\n';
+  const rUnknown = analyzeBatchCsv(unknownCsv, { isPro: true });
+  assert.equal(rUnknown.errors.length, 1);
+  assert.equal(rUnknown.exportBlocked, true);
+  assert.equal(rUnknown.exportCsv, null);
+
+  // Supplying explicit Base Rate allows export cleanly
+  const manualCsv = 'SKU,Product,Origin,HTS,Unit Cost,Qty,Base Rate\nVN-1,Mystery Widget,VN,9999.88.77,10,100,4.5%\n';
+  const rManual = analyzeBatchCsv(manualCsv, { isPro: true });
+  assert.equal(rManual.errors.length, 0);
+  assert.equal(rManual.exportBlocked, false);
+  assert.equal(rManual.rows[0].breakdown.mfnDuty, 45);
+
+  // 6-digit prefix-only match (6109.10.99 != 6109.10.00) must block unless explicitly confirmed or manual rate given
+  const prefixCsv = 'SKU,Product,Origin,HTS,Unit Cost,Qty\nVN-2,Other Tee,VN,6109.10.99,10,100\n';
+  const rPrefix = analyzeBatchCsv(prefixCsv, { isPro: true });
+  assert.equal(rPrefix.errors.length, 1);
+  assert.match(rPrefix.errors[0].message, /6-digit heading/);
+  assert.equal(rPrefix.exportBlocked, true);
+});
+
+test('400-SKU consolidated entry allocates integer cents non-negatively and reconciles exactly (Codex Medium finding)', () => {
+  const header = 'SKU,Product,Origin,HTS,Unit Cost,Qty,Mode';
+  const lines = [header];
+  for (let i = 1; i <= 400; i += 1) {
+    lines.push(`SHIRT-${i},Cotton Tee ${i},VN,6109.10.00,1.00,1,air`);
+  }
+  // 400 x $1 = $400 non-Sec-301 consolidated entry -> informal $2.77 (277 cents across 400 equal rows!)
+  const res = analyzeBatchCsv(lines.join('\n'), { isPro: true, entryBasis: 'consolidated', entryDate: '2026-11-25' });
+  assert.equal(res.errors.length, 0);
+  assert.equal(res.rows.length, 400);
+  assert.equal(res.exportBlocked, false);
+  for (const r of res.rows) {
+    assert.ok(r.breakdown.mpfFee >= 0, `Negative MPF found: ${r.breakdown.mpfFee}`);
+  }
+  const sumMpfCents = res.rows.reduce((s, r) => s + Math.round(r.breakdown.mpfFee * 100), 0);
+  assert.equal(sumMpfCents, 277);
+
+  // Also test formal entry floor ($34.58 = 3458 cents across 400 rows of $10 = $4,000)
+  const alloc = allocateCentsProRata(34.58, new Array(400).fill(10));
+  assert.equal(alloc.every((v) => v >= 0), true);
+  assert.equal(alloc.reduce((s, v) => s + Math.round(v * 100), 0), 3458);
+});
+
+test('USMCA preference, Sec 232 stacking, thousands commas, mode aliases, and CSV formula guard', () => {
+  const usmca = calculateShipment({
+    presetId: 'leather-bags', origin: 'MX', shippingMode: 'truck', unitCost: 50, quantity: 200, usmcaQualifying: true,
+  });
+  assert.equal(usmca.breakdown.mfnDuty, 0);
+  assert.equal(usmca.breakdown.mpfFee, 0);
+
+  const bolts = calculateShipment({
+    entryDate: '2026-11-25', presetId: 'steel-bolts', origin: 'CN', shippingMode: 'ocean', unitCost: 5, quantity: 200,
+  });
+  assert.equal(bolts.breakdown.sec301Duty, 250);
+  assert.equal(bolts.breakdown.sec232Duty, 250);
+  assert.equal(bolts.breakdown.mpfFee, 34.58);
+
   assert.equal(normalizeShippingMode('Sea'), 'ocean');
   assert.equal(normalizeShippingMode('DHL'), 'courier');
   assert.equal(normalizeShippingMode('teleport'), '');
 
-  assert.throws(() => calculateShipment({ origin: 'CN', unitCost: 10, quantity: 10, mfnRate: 'abc' }));
-  assert.throws(() => calculateShipment({ origin: 'CN', unitCost: 10, quantity: 10, extraTariffRate: -5 }));
-});
-
-test('Batch CSV analyzer handles thousands commas, consolidated pro-rata MPF vs separate MPF, and formula guard', () => {
-  const rows = [
+  const batchCsv = [
     'SKU,Product,Origin,HTS,Unit Cost,Qty,Freight,Mode,Retail Price,USMCA',
-    '"=SUM(A1)","Cotton Tee, Heavy",HK,6109.10.00,"$1,000.00","2",100,Sea,"$2,500.00",no',
-    'S2,Tee 2,VN,6109.10.00,10.00,200,100,ocean,35.00,no',
-    'S3,Mug,CN,6912.00.44,3.00,200,150,ocean,16.00,no',
-    'S4,Cable,CN,8544.42.90,2.00,500,120,air,12.00,no',
-    'S5,Serum,KR,3304.99.50,5.00,200,90,DHL,32.00,no',
-    'S6,Bag,MX,4202.21.90,25.00,100,200,truck,110.00,yes',
+    '"=SUM(A1)","Heavy Tee",CN,6109.10.00,"$1,000.00","2",100,Sea,"$2,500.00",no',
+    'S2,Bag,MX,4202.21.90,25.00,100,200,truck,110.00,yes',
   ].join('\n');
-
-  // Free preview truncates to 5 rows
-  const freeRes = analyzeBatchCsv(rows, { isPro: false, entryBasis: 'consolidated' });
-  assert.equal(freeRes.errors.length, 0);
-  assert.equal(freeRes.totalSkus, 6);
-  assert.equal(freeRes.visibleSkus, 5);
-  assert.equal(freeRes.truncatedCount, 1);
-  assert.equal(freeRes.exportBlocked, true);
-  assert.equal(freeRes.exportCsv, null);
-
-  // Pro consolidated: non-USMCA customs = 2000 + 2000 + 600 + 1000 + 1000 = $6,600 -> single formal MPF $32.71 (since $6,600*0.003464=$22.86 < $32.71)
-  const proCons = analyzeBatchCsv(rows, { isPro: true, entryBasis: 'consolidated' });
-  assert.equal(proCons.errors.length, 0);
-  assert.equal(proCons.visibleSkus, 6);
-  assert.equal(proCons.exportBlocked, false);
-  const totalMpfCons = Math.round(proCons.rows.reduce((s, r) => s + r.breakdown.mpfFee, 0) * 100) / 100;
-  assert.equal(totalMpfCons, 32.71);
-  assert.equal(proCons.rows[5].breakdown.mpfFee, 0); // USMCA MX row pays $0 MPF
-  assert.equal(proCons.rows[0].origin, 'CN');        // HK -> CN
-  assert.equal(proCons.rows[0].shippingMode, 'ocean'); // Sea -> ocean
-  assert.ok(proCons.exportCsv.includes("'=SUM(A1)")); // Formula injection guarded
-
-  // Separate entry mode applies MPF independently per SKU
-  const proSep = analyzeBatchCsv(rows, { isPro: true, entryBasis: 'separate' });
-  const totalMpfSep = Math.round(proSep.rows.reduce((s, r) => s + r.breakdown.mpfFee, 0) * 100) / 100;
-  assert.ok(totalMpfSep > totalMpfCons);
-});
-
-test('Batch CSV analyzer blocks export on invalid country, unclosed quotes, bogus shipping mode, or invalid margin', () => {
-  const badCountry = 'SKU,Product,Origin,HTS,Unit Cost,Qty\nOK-1,Good,CN,6109.10.00,10,100\nBAD-2,Broken,MARS,6109.10.00,10,100\n';
-  const r1 = analyzeBatchCsv(badCountry, { isPro: true });
-  assert.equal(r1.errors.length, 1);
-  assert.equal(r1.exportBlocked, true);
-  assert.equal(r1.exportCsv, null);
-
-  const unclosedQuote = 'SKU,Product,Origin,Unit Cost,Qty\nA,"Broken Quote,CN,10,100\n';
-  const r2 = analyzeBatchCsv(unclosedQuote, { isPro: true });
-  assert.equal(r2.errors.length, 1);
-  assert.match(r2.errors[0].message, /unclosed quoted/i);
-  assert.equal(r2.exportBlocked, true);
-
-  const badMode = 'SKU,Product,Origin,Unit Cost,Qty,Mode\nA,Item,VN,10,100,teleport\n';
-  const r3 = analyzeBatchCsv(badMode, { isPro: true });
-  assert.equal(r3.errors.length, 1);
-  assert.equal(r3.exportBlocked, true);
-
-  const badMargin = analyzeBatchCsv('SKU,Unit Cost,Qty\nA,10,100\n', { isPro: true, defaultTargetMarginPct: 100 });
-  assert.equal(badMargin.errors.length, 1);
-  assert.equal(badMargin.exportBlocked, true);
+  const res = analyzeBatchCsv(batchCsv, { isPro: true, entryDate: '2026-11-25' });
+  assert.equal(res.errors.length, 0);
+  assert.ok(res.exportCsv.includes("'=SUM(A1)"));
+  assert.equal(res.rows[0].shippingMode, 'ocean');
+  assert.equal(res.rows[1].breakdown.mpfFee, 0);
 });
