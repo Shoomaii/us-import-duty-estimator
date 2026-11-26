@@ -449,6 +449,15 @@ function renderHtml({ isPro }) {
         document.getElementById('singleWarnings').innerHTML = res.warnings
           .map((w) => \`<div class="alert alert-warn">\${esc(w)}</div>\`).join('');
       } catch (err) {
+        document.getElementById('kpiUnitLanded').textContent = '—';
+        document.getElementById('kpiDutyPerUnit').textContent = 'Fix input error below';
+        document.getElementById('kpiRecPrice').textContent = '—';
+        document.getElementById('kpiCurrentMargin').textContent = '—';
+        document.getElementById('kpiTotalTax').textContent = '—';
+        document.getElementById('kpiEffRate').textContent = '—';
+        document.getElementById('kpiTotalLanded').textContent = '—';
+        document.getElementById('kpiEntryType').textContent = '—';
+        document.getElementById('breakdownLines').innerHTML = '';
         document.getElementById('singleWarnings').innerHTML = \`<div class="alert alert-err">\${esc(err.message)}</div>\`;
       }
     }
@@ -471,6 +480,24 @@ function renderHtml({ isPro }) {
 
     // Batch analyzer
     let lastBatch = null;
+    function invalidateBatch(reason = 'Batch inputs changed — click "Analyze Batch SKUs" to refresh results before exporting.') {
+      if (IS_PRO) {
+        document.getElementById('btnDlCsv').disabled = true;
+        document.getElementById('btnDlRunbook').disabled = true;
+      }
+      if (!lastBatch) return;
+      lastBatch = null;
+      if (reason) {
+        document.getElementById('batchAlerts').innerHTML = \`<div class="alert alert-warn"><strong>Analysis out of date (exports disabled):</strong> \${esc(reason)}</div>\`;
+      }
+    }
+
+    ['batchCsvText','batchEntryDate','batchEntryBasis','batchExtraRate','batchMargin','batchMode','batchBroker'].forEach((id) => {
+      const el = document.getElementById(id);
+      el.addEventListener('input', () => invalidateBatch());
+      el.addEventListener('change', () => invalidateBatch());
+    });
+
     function runBatch() {
       const text = document.getElementById('batchCsvText').value;
       const res = analyzeBatchCsv(text, {
@@ -541,19 +568,21 @@ function renderHtml({ isPro }) {
       document.getElementById('batchAlerts').innerHTML = '';
       document.getElementById('batchSummary').classList.add('hidden');
       document.getElementById('batchTableWrap').classList.add('hidden');
-      lastBatch = null;
-      if (IS_PRO) {
-        document.getElementById('btnDlCsv').disabled = true;
-        document.getElementById('btnDlRunbook').disabled = true;
-      }
+      invalidateBatch('');
     });
     document.getElementById('csvFileInput').addEventListener('change', (ev) => {
       const f = ev.target.files && ev.target.files[0];
       if (!f) return;
+      invalidateBatch('Loading replacement CSV file...');
       const reader = new FileReader();
       reader.onload = () => {
         document.getElementById('batchCsvText').value = String(reader.result || '');
+        ev.target.value = '';
         runBatch();
+      };
+      reader.onerror = () => {
+        ev.target.value = '';
+        invalidateBatch('Failed to read CSV file.');
       };
       reader.readAsText(f);
     });
@@ -568,10 +597,10 @@ function renderHtml({ isPro }) {
         URL.revokeObjectURL(a.href);
       }
       document.getElementById('btnDlCsv').addEventListener('click', () => {
-        if (lastBatch && lastBatch.exportCsv) dl('us-landed-cost-breakdown.csv', lastBatch.exportCsv, 'text/csv;charset=utf-8');
+        if (lastBatch && !lastBatch.exportBlocked && lastBatch.exportCsv) dl('us-landed-cost-breakdown.csv', lastBatch.exportCsv, 'text/csv;charset=utf-8');
       });
       document.getElementById('btnDlRunbook').addEventListener('click', () => {
-        if (lastBatch && lastBatch.runbookMd) dl('ddp-pricing-runbook.md', lastBatch.runbookMd, 'text/markdown;charset=utf-8');
+        if (lastBatch && !lastBatch.exportBlocked && lastBatch.runbookMd) dl('ddp-pricing-runbook.md', lastBatch.runbookMd, 'text/markdown;charset=utf-8');
       });
     }
   </script>

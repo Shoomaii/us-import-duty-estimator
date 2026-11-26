@@ -22,6 +22,9 @@ test('Entry-date versioning selects FY2026 vs FY2027 official CBP MPF schedule a
   assert.equal(fy27.mpfFormalMin, 34.58);
   assert.equal(fy27.mpfFormalMax, 670.86);
   assert.equal(fy27.mpfInformalFee, 2.77);
+
+  assert.throws(() => getCbpSchedule('2026-02-30'));
+  assert.throws(() => getCbpSchedule('2026-13-01'));
 });
 
 test('China ocean formal shipment stacks MFN + Section 301 + FY2027 MPF + HMF accurately', () => {

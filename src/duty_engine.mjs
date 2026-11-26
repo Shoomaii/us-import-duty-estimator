@@ -35,8 +35,16 @@ export const CBP_RULES = {
 
 export function getCbpSchedule(entryDate = DEFAULT_ENTRY_DATE) {
   const raw = String(entryDate || DEFAULT_ENTRY_DATE).trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) {
     throw new Error(`Invalid entry date "${entryDate}". Use YYYY-MM-DD format.`);
+  }
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() + 1 !== mo || dt.getUTCDate() !== d) {
+    throw new Error(`Invalid calendar entry date "${entryDate}".`);
   }
   const schedule = raw < '2026-10-01' ? MPF_SCHEDULES.FY2026 : MPF_SCHEDULES.FY2027;
   return {
