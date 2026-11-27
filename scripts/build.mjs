@@ -342,6 +342,10 @@ function renderHtml({ isPro }) {
         </div>
         <a class="btn btn-primary" href="${process.env.PRO_CHECKOUT_URL || 'mailto:jshoomaii@gmail.com?subject=US%20Import%20Duty%20Estimator%20Offline%20Pro%20(%2419)&body=Hi%2C%20please%20send%20the%20checkout%20link%20for%20the%20US%20Import%20Duty%20Estimator%20Offline%20Pro%20HTML%20(%2419).'}" ${process.env.PRO_CHECKOUT_URL ? 'target="_blank" rel="noopener"' : ''}>Get Offline Pro ($19)</a>
       </div>
+      <div id="serviceCta" style="margin-top:12px;padding:12px 14px;border:1px dashed #cbd5e1;border-radius:10px;font-size:13.5px;color:var(--muted);">
+        <strong>Rather not do it yourself?</strong> Send your SKU list (product, HTS code if known, origin country, unit cost) and get back a reviewed landed-cost + suggested DDP retail price sheet ready for Shopify/Amazon import within 48h. <strong>Flat $149 up to 500 SKUs.</strong>
+        <a href="${process.env.SERVICE_URL || 'mailto:jshoomaii@gmail.com?subject=Done-for-you%20landed%20cost%20sheet%20(%24149)&body=Hi%2C%20I%27d%20like%20a%20done-for-you%20landed-cost%20sheet.%20Store%20URL%3A%20%0AApprox.%20SKU%20count%3A%20%0AOrigin%20countries%3A%20'}" style="font-weight:600;">Request a done-for-you sheet &rarr;</a>
+      </div>
       `}
     </section>
 
